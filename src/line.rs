@@ -26,12 +26,11 @@ impl<'a> Line<'a> {
                 // The end byte-index (inclusive) to trim self.processed to.
                 let mut trim_to = None;
                 if char_before
-                    .and_then(|s| dbg!(s.chars().next()))
+                    .and_then(|s| s.chars().next())
                     .map_or(false, is_space)
                 {
                     // Space before comment; trim out the comment, incl. '%'
                     // E.g. "xyz... % comment" -> "xyz... "
-                    dbg!(self.orig);
                     trim_to = Some(i);
                 } else if char_before.map_or(false, |s| s != "\\") {
                     // The match is a '%' not preceded by a '\', i.e. a true EOL-comment.
@@ -42,7 +41,6 @@ impl<'a> Line<'a> {
                 // Finally, overwite self.processed.
                 if let Some(trim_to_) = trim_to {
                     if let Some(s) = self.processed.get(..trim_to_) {
-                        dbg!(s);
                         self.processed = s.trim_end_matches(is_space);
                     }
                 }

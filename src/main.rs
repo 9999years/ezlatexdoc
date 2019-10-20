@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::Path;
 
@@ -15,10 +15,10 @@ fn clap_app<'a, 'b>() -> App<'a, 'b> {
         (version: "0.0.1")
         (author: "Rebecca Turner <rbt@sent.as>")
         (about: "A user-friendly alternative to the LaTeX docstrip program.")
-        (@arg OUTPUT: -o --output +takes_value "File for doc output. Defaults to STDOUT.")
-        (@arg SRC_OUTPUT: -s --source +takes_value
-         "File for processed source output. Defaults to the input file with .tex instead of its extension.")
+        (@arg DOC_OUTPUT: -o --output +takes_value "File for doc output. Defaults to the input file with .tex instead of its extension.")
         (@arg INPUT: +required "TeX file to strip of doc comments.")
+        (@arg SRC_OUTPUT: +required
+         "File for processed source output.")
     )
 }
 
@@ -29,7 +29,10 @@ quick_error! {
             display("Invalid path; a Unicode error somewhere. You shouldn't see this.")
         }
         NoInput {
-            display("No input file. You shouldn't see this.")
+            display("No input file name found. You shouldn't see this.")
+        }
+        NoOutput {
+            display("No stripped input file name found. You shouldn't see this.")
         }
         AlreadyExists(path: OsString) {
             display("Output file {:?} already exists", path)
@@ -38,9 +41,9 @@ quick_error! {
     }
 }
 
-fn source_output_file(matches: &ArgMatches<'_>) -> Result<File, MainError> {
+fn doc_output_file(matches: &ArgMatches<'_>) -> Result<File, MainError> {
     matches
-        .value_of("SRC_OUTPUT")
+        .value_of("DOC_OUTPUT")
         .map(|s| s.into())
         .ok_or(())
         .or_else(|_| {
@@ -58,19 +61,17 @@ fn source_output_file(matches: &ArgMatches<'_>) -> Result<File, MainError> {
         .and_then(|s: String| util::open_new(s).map_err(MainError::Io))
 }
 
-fn doc_output_file(matches: &ArgMatches<'_>) -> Result<util::Writer, io::Error> {
+fn src_output_file(matches: &ArgMatches<'_>) -> Result<File, MainError> {
     matches
-        .value_of("OUTPUT")
-        .map(|s| OpenOptions::new().write(true).create_new(true).open(s))
-        .transpose()
-        .map(|o| o.map(|f| util::Writer::File(f)))
-        .map(|f| f.unwrap_or_else(|| util::Writer::Stdout(io::stdout())))
+        .value_of("SRC_OUTPUT")
+        .ok_or(MainError::NoOutput)
+        .and_then(|s| util::open_new(s).map_err(MainError::Io))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let matches = clap_app().get_matches();
     let mut doc_write = DocWrite {
-        src: source_output_file(&matches)?,
+        src: src_output_file(&matches)?,
         doc: doc_output_file(&matches)?,
     };
     let lines = util::file_lines(matches.value_of("INPUT").ok_or(MainError::NoInput)?)?;
