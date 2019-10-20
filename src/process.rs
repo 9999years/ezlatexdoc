@@ -1,6 +1,6 @@
 use crate::line::{Line, LineKind};
 use std::io;
-use std::io::{Write};
+use std::io::Write;
 use std::ops::Deref;
 
 /// The two output streams -- one stripped of documentation, one only for documentation -- of an
@@ -14,7 +14,12 @@ where
     pub doc: D,
 }
 
-pub fn process<S, D>(
+fn write_line<W: Write>(writer: &mut W, line: &Line) -> io::Result<()> {
+    writer.write_all(line.processed.as_bytes())?;
+    writer.write_all(b"\n")
+}
+
+pub fn process_lines<S, D>(
     input: impl Iterator<Item = io::Result<String>>,
     output: &mut DocWrite<S, D>,
 ) -> io::Result<()>
@@ -33,10 +38,10 @@ where
             // Ignore directives.
             LineKind::Directive => {}
             // Write documentation to the doc stream.
-            LineKind::Documentation => output.doc.write_all(line.processed.as_bytes())?,
+            LineKind::Documentation => write_line(&mut output.doc, &line)?,
             // Write commends and source to the stripped source stream.
             LineKind::Comment | LineKind::Source => {
-                output.src.write_all(line.processed.as_bytes())?
+                write_line(&mut output.src, &line)?
             }
         }
     }

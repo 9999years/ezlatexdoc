@@ -11,6 +11,7 @@ categories = ["command-line-utilities", "development-tools::build-utils"]
 
 [dependencies]
 clap = "2.33.0"
+quick-error = "1.2.2"
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"
