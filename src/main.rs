@@ -3,7 +3,6 @@ use std::io;
 use std::io::{BufRead, BufReader,};
 use std::path::Path;
 use clap::{clap_app, App, ArgMatches};
-use indoc::indoc;
 
 // Returns an Iterator<Item = io::Result<String>>
 fn file_lines<P>(path: P) -> io::Result<io::Lines<BufReader<File>>>
