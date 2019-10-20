@@ -2,13 +2,15 @@
 name = "ezlatexdoc"
 version = "0.1.0"
 authors = ["Rebecca Turner <rbt@sent.as>"]
+license = "LPPL-1.3c"
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+description = "A modern and friendly alternative to docstrip for LaTeX package documentation."
+repository = "https://github.com/9999years/ezlatexdoc"
+keywords = ["TeX", "LaTeX", "documentation"]
+categories = ["command-line-utilities", "development-tools::build-utils"]
 
 [dependencies]
 clap = "2.33.0"
-indoc = "0.3.4"
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"
