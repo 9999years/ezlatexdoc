@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 clap = "2.33.0"
 indoc = "0.3.4"
+quick-error = "1.2.2"
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"

@@ -53,7 +53,7 @@ impl<'a> Line<'a> {
     }
 }
 
-impl <'a> From<&'a str> for Line<'a> {
+impl<'a> From<&'a str> for Line<'a> {
     /// Converts and cleans up a source line.
     ///
     /// ```
@@ -194,7 +194,7 @@ fn is_space(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::{assert_eq, assert_ne};
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn is_space_test() {

@@ -1,6 +1,6 @@
 use crate::line::{Line, LineKind};
 use std::io;
-use std::io::{Write};
+use std::io::Write;
 use std::ops::Deref;
 
 /// The two output streams -- one stripped of documentation, one only for documentation -- of an
@@ -14,7 +14,7 @@ where
     pub doc: D,
 }
 
-pub fn process<S, D>(
+pub fn process_lines<S, D>(
     input: impl Iterator<Item = io::Result<String>>,
     output: &mut DocWrite<S, D>,
 ) -> io::Result<()>
