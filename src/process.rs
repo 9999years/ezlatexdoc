@@ -1,21 +1,10 @@
 use crate::line::{Line, LineKind};
-use line;
-use std::fs::File;
 use std::io;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Write};
 use std::ops::Deref;
-use std::path::Path;
 
-// Returns an Iterator<Item = io::Result<String>>
-pub fn file_lines<P>(path: P) -> io::Result<io::Lines<BufReader<File>>>
-where
-    P: AsRef<Path>,
-{
-    Ok(BufReader::new(File::open(path)?).lines())
-}
-
-/// An interface for coupling the two output streams -- one stripped of documentation, one only
-/// for documentation -- of an ezlatexdoc run.
+/// The two output streams -- one stripped of documentation, one only for documentation -- of an
+/// ezlatexdoc run.
 pub struct DocWrite<S, D>
 where
     S: Write,
