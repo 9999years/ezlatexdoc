@@ -12,9 +12,14 @@ categories = ["command-line-utilities", "development-tools::build-utils"]
 [dependencies]
 clap = "2.33.0"
 quick-error = "1.2.2"
+lalrpop-util = "0.17.2"
+regex = "1.3.1"
 
 [dev-dependencies]
 pretty_assertions = "0.6.1"
+
+[build-dependencies]
+lalrpop = "0.17.2"
 
 [lib]
 name = "ezlatexdoc"
