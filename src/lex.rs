@@ -3,13 +3,14 @@ use std::fmt::{Display, Formatter};
 use std::iter;
 use std::vec;
 
+use nom;
 use nom::IResult;
 use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete,
     character::complete::{anychar, line_ending, multispace0, none_of, not_line_ending},
-    combinator::{map, not, opt, recognize, value},
+    combinator::{complete, map, not, opt, recognize, value},
     multi::{fold_many0, many1, separated_nonempty_list},
     sequence::{pair, preceded, terminated},
 };
@@ -138,7 +139,10 @@ fn non_comment(input: &str) -> IResult<&str, &str> {
 
 /// non_comment wrapped in a chunk.
 fn non_comment_chunk<'input>(input: &'input str) -> IResult<&'input str, Chunk<'input>> {
-    map(non_comment, Chunk::Source)(input)
+    map(
+        recognize(separated_nonempty_list(line_ending, non_comment)),
+        Chunk::Source,
+    )(input)
 }
 
 fn directive_tag(input: &str) -> IResult<&str, CommentKind> {
@@ -229,20 +233,27 @@ fn collapse_comments(comments: Vec<Comment<&str>>) -> Vec<Comment<String>> {
     }
 }
 
-pub fn parse<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
+fn parse_document_fragment<'input>(
+    input: &'input str,
+) -> IResult<&'input str, (Chunks<'input>, Option<Chunks<'input>>)> {
     let non_comment = map(non_comment_chunk, Chunks::One);
     let inline_comment = map(inline_comment_chunk, Chunks::One);
     let any_comments = map(any_comment_chunk, Chunks::More);
 
+    alt((
+        // Non-comment source followed by an optional inline comment and a line-end.
+        terminated(pair(non_comment, opt(inline_comment)), line_ending_or_eof),
+        // A block of sol-comments; we map it to a tuple to satisfy the type-constraint from the
+        // other branch.
+        map(terminated(any_comments, line_ending_or_eof), |comments| {
+            (comments, None)
+        }),
+    ))(input)
+}
+
+fn parse_document_greedy<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
     fold_many0(
-        alt((
-            // non-comment source followed by an optional inline comment and a line-end
-            terminated(pair(non_comment, opt(inline_comment)), line_ending_or_eof),
-            // a block of sol-comments
-            map(terminated(any_comments, line_ending_or_eof), |comments| {
-                (comments, None)
-            }),
-        )),
+        parse_document_fragment,
         Vec::<Chunk<'input>>::new(),
         |mut acc, (chunks, maybe_chunk)| {
             acc.extend(chunks);
@@ -254,71 +265,97 @@ pub fn parse<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'inpu
     )(input)
 }
 
+pub fn parse_document<'input>(
+    input: &'input str,
+) -> Result<Vec<Chunk<'input>>, nom::Err<(&'input str, nom::error::ErrorKind)>> {
+    Ok(complete(parse_document_greedy)(input)?.1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use indoc::indoc;
     use pretty_assertions::assert_eq;
+    use unindent::unindent;
+
+    /// Utility function for creating a chunk of source code.
+    fn src(source: &str) -> Chunk<'_> {
+        Chunk::Source(source)
+    }
+
+    fn _comment(text: &str, kind: CommentKind) -> Chunk<'_> {
+        Chunk::Comment(Comment {
+            text: unindent(text),
+            kind,
+        })
+    }
+
+    /// Utility function for creating a directive comment chunk.
+    fn dir(text: &str) -> Chunk<'_> {
+        _comment(text, CommentKind::Directive)
+    }
+
+    /// Utility function for creating a documentation comment chunk.
+    fn doc(text: &str) -> Chunk<'_> {
+        _comment(text, CommentKind::Documentation)
+    }
+
+    /// Utility function for creating a preserved comment comment chunk.
+    fn preserved(text: &str) -> Chunk<'_> {
+        _comment(text, CommentKind::Preserved)
+    }
+
+    /// Utility function for creating an EOL comment chunk.
+    fn eol(text: &str) -> Chunk<'_> {
+        _comment(text, CommentKind::Eol)
+    }
 
     #[test]
     fn parse_empty() {
-        assert_eq!(Ok(("", vec![])), parse(""));
+        assert_eq!(Ok(vec![]), parse_document(""));
     }
 
     #[test]
     fn parse_source_simple() {
         assert_eq!(
-            Ok(("", vec![Chunk::Source("lorem ipsum dolor...")])),
-            parse("lorem ipsum dolor...")
+            Ok(vec![src(indoc!(
+                "lorem ipsum dolor...
+                 foo bar baz"
+            ))]),
+            parse_document(indoc!(
+                "lorem ipsum dolor...
+                 foo bar baz"
+            ))
+        );
+
+        assert_eq!(
+            Ok(vec![src("lorem ipsum dolor...")]),
+            parse_document("lorem ipsum dolor...")
         );
     }
 
     #[test]
     fn parse_eol_comment_simple() {
         assert_eq!(
-            Ok((
-                "",
-                vec![
-                    Chunk::Source("lorem ipsum dolor..."),
-                    Chunk::Comment(Comment {
-                        kind: CommentKind::Eol,
-                        text: "eol comment (thrown away)".to_string(),
-                    }),
-                ]
-            )),
-            parse("lorem ipsum dolor...% eol comment (thrown away)")
+            Ok(vec![
+                src("lorem ipsum dolor..."),
+                eol("eol comment (thrown away)"),
+            ]),
+            parse_document("lorem ipsum dolor...% eol comment (thrown away)")
         );
     }
 
     #[test]
     fn parse_directives() {
         assert_eq!(
-            Ok((
-                "",
-                vec![
-                    Chunk::Comment(Comment {
-                        text: indoc!(
-                            "
-                            ezlatexdoc directives
-                            all come in blocks where each line starts with '%%%'
-                            whitespace before the markers is optional.
-                            "
-                        )
-                        .trim_end()
-                        .to_string(),
-                        kind: CommentKind::Directive,
-                    }),
-                    Chunk::Comment(Comment {
-                        text: "this plain comment will be thrown out...".to_string(),
-                        kind: CommentKind::Eol,
-                    }),
-                    Chunk::Comment(Comment {
-                        text: "...but it breaks up the directive blocks into two.".to_string(),
-                        kind: CommentKind::Directive,
-                    }),
-                ]
-            )),
-            parse(indoc!(
+            Ok(vec![
+                dir("ezlatexdoc directives
+                    all come in blocks where each line starts with '%%%'
+                    whitespace before the markers is optional."),
+                eol("this plain comment will be thrown out..."),
+                dir("...but it breaks up the directive blocks into two."),
+            ]),
+            parse_document(indoc!(
                 "
                 %%% ezlatexdoc directives
                 %%% all come in blocks where each line starts with '%%%'
@@ -327,6 +364,48 @@ mod tests {
                 %%% ...but it breaks up the directive blocks into two.
                 "
             )),
+        );
+    }
+
+    #[test]
+    fn parse_mixed() {
+        assert_eq!(
+            Ok(vec![
+                src(indoc!(
+                    "foo bar
+                     foo bar baz
+                     foo bar"
+                )),
+                eol("eol"),
+                src("foo baz"),
+                preserved("preserved"),
+                src("baz qux"),
+                dir("directives\ndirectives"),
+                doc("documentation...
+                    ...goes here, and doesn't even need to be in TeX"),
+                eol("impl note"),
+                src(indoc!(
+                    "more source...
+                     foo bar baz
+                     bux boz"
+                )),
+            ]),
+            parse_document(indoc!(
+                "foo bar
+                foo bar baz
+                foo bar% eol
+                foo baz%! preserved
+                baz qux
+                %%% directives
+                %%% directives
+                %% documentation...
+                %% ...goes here, and doesn't even need to be in TeX
+                % impl note
+                more source...
+                foo bar baz
+                bux boz
+                "
+            ))
         );
     }
 }
