@@ -1,3 +1,5 @@
+use std::fmt;
+use std::fmt::{Display, Formatter};
 use std::iter;
 use std::vec;
 
@@ -6,15 +8,20 @@ use nom::{
     branch::alt,
     bytes::complete::tag,
     character::complete,
-    character::complete::{anychar, none_of, not_line_ending, one_of},
-    combinator::{map, not, recognize, value},
-    multi::{many0, many1, separated_nonempty_list},
-    sequence::{pair, preceded},
+    character::complete::{anychar, line_ending, multispace0, none_of, not_line_ending},
+    combinator::{map, not, opt, recognize, value},
+    multi::{fold_many0, many1, separated_nonempty_list},
+    sequence::{pair, preceded, terminated},
 };
+
+use unindent::unindent;
+
+use itertools::Itertools;
 
 const DIRECTIVE_TAG: &str = "%%%";
 const DOC_TAG: &str = "%%";
 const PRESERVED_COMMENT_TAG: &str = "%!";
+const EOL_COMMENT_TAG: char = '%';
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Chunk<'a> {
@@ -31,146 +38,226 @@ pub enum CommentKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Comment<T: Clone + PartialEq> {
+pub struct Comment<T> {
     pub text: T,
     pub kind: CommentKind,
 }
 
+impl<T: Display> Display for Comment<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
+        writeln!(f, "{}", self.text)
+    }
+}
+
 impl Comment<&str> {
+    /// Not using the ToOwned trait because it isn't letting me return Comment<String> instead of
+    /// Comment<&str> :(
     pub fn to_owned(&self) -> Comment<String> {
         Comment {
             text: String::from(self.text),
             kind: self.kind,
         }
     }
+
+    /// Like `to_owned`, but prepends '\n' to self.text. Why? `unindent` ignores the first line.
+    /// (FML).
+    pub fn after_newline(&self) -> Comment<String> {
+        let mut text_new = String::with_capacity(self.text.len() + 1);
+        text_new.push('\n');
+        text_new.push_str(self.text);
+        Comment {
+            text: text_new,
+            kind: self.kind,
+        }
+    }
+
+    pub fn trimmed(&self) -> Comment<String> {
+        Comment {
+            text: self.text.trim_start().to_string(),
+            kind: self.kind,
+        }
+    }
 }
 
-/// Processes an escaped character; this may be part of or an entire control sequence.
+enum Chunks<'a> {
+    One(Chunk<'a>),
+    More(Vec<Chunk<'a>>),
+}
+
+impl<'a> IntoIterator for Chunks<'a> {
+    type IntoIter = ChunksIter<'a>;
+    type Item = Chunk<'a>; //Self::Iter::Item;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Chunks::One(c) => ChunksIter::One(iter::once(c)),
+            Chunks::More(cs) => ChunksIter::More(cs.into_iter()),
+        }
+    }
+}
+
+enum ChunksIter<'a> {
+    One(iter::Once<Chunk<'a>>),
+    More(vec::IntoIter<Chunk<'a>>),
+}
+
+impl<'a> Iterator for ChunksIter<'a> {
+    type Item = Chunk<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            ChunksIter::One(chunk) => chunk.next(),
+            ChunksIter::More(chunks) => chunks.next(),
+        }
+    }
+}
+
+/// Succeeds if the parser is at the end of input. Otherwise, returns an error.
+fn eof(input: &str) -> IResult<&str, ()> {
+    not(anychar)(input)
+}
+
+fn line_ending_or_eof(input: &str) -> IResult<&str, ()> {
+    alt((value((), line_ending), eof))(input)
+}
+
+/// Recognizes an escaped character /\\./; this may be part of or an entire control sequence.
+/// (Note that /./ in the example regex does not include \n.)
 fn escaped(input: &str) -> IResult<&str, &str> {
-    recognize(pair(complete::char('\\'), anychar))(input)
+    recognize(pair(complete::char('\\'), none_of("\r\n")))(input)
 }
 
-fn _non_comment(input: &str) -> IResult<&str, &str> {
-    alt((recognize(none_of("%\\")), recognize(escaped)))(input)
-}
-
-/// Parses the next non-comment sequence; this may include escaped percent signs
+/// Recognizes as long a sequence of non-comment source code as possible (either a character
+/// /[^\\%\n]/, or an escape). Stops parsing when it finds a comment or a newline.
 fn non_comment(input: &str) -> IResult<&str, &str> {
-    recognize(many1(_non_comment))(input)
+    recognize(many1(alt((
+        recognize(none_of("%\\\r\n")),
+        recognize(escaped),
+    ))))(input)
 }
 
-// fn plain_eol_comment(input: &str) -> IResult<&str, Comment<&str>> {
-// preceded(not(special_comment), eol_comment)(input)
-// }
+/// non_comment wrapped in a chunk.
+fn non_comment_chunk<'input>(input: &'input str) -> IResult<&'input str, Chunk<'input>> {
+    map(non_comment, Chunk::Source)(input)
+}
 
-fn eol_comment(input: &str) -> IResult<&str, Comment<&str>> {
-    map(
-        preceded(complete::char('%'), not_line_ending),
-        |comment_text| Comment {
-            text: comment_text,
-            kind: CommentKind::Eol,
-        },
+fn directive_tag(input: &str) -> IResult<&str, CommentKind> {
+    value(CommentKind::Directive, tag(DIRECTIVE_TAG))(input)
+}
+
+fn documentation_tag(input: &str) -> IResult<&str, CommentKind> {
+    value(CommentKind::Documentation, tag(DOC_TAG))(input)
+}
+
+fn preserved_tag(input: &str) -> IResult<&str, CommentKind> {
+    value(CommentKind::Preserved, tag(PRESERVED_COMMENT_TAG))(input)
+}
+
+fn eol_tag(input: &str) -> IResult<&str, CommentKind> {
+    value(CommentKind::Eol, complete::char(EOL_COMMENT_TAG))(input)
+}
+
+/// Parses a comment tag valid for an inline commennt; this includes preserved and eol tags.
+fn inline_comment_tag(input: &str) -> IResult<&str, CommentKind> {
+    alt((preserved_tag, eol_tag))(input)
+}
+
+/// Parses a comment tag valid *only* at the start of a line; doesn't include tags that are valid
+/// both for inline and start-of-line comments.
+fn only_sol_comment_tag(input: &str) -> IResult<&str, CommentKind> {
+    alt((directive_tag, documentation_tag))(input)
+}
+
+/// Parses any comment tag.
+fn any_comment_tag(input: &str) -> IResult<&str, CommentKind> {
+    alt((only_sol_comment_tag, inline_comment_tag))(input)
+}
+
+/// An EOL-comment. Doesn't recognize special comments (e.g. directives or documentation), but will
+/// recognize preserved comments.
+fn inline_comment(input: &str) -> IResult<&str, Comment<&str>> {
+    preceded(
+        not(only_sol_comment_tag),
+        map(pair(inline_comment_tag, not_line_ending), |(kind, text)| {
+            Comment { text, kind }
+        }),
     )(input)
 }
 
-fn comment_tag(input: &str) -> IResult<&str, CommentKind> {
-    alt((
-        value(CommentKind::Directive, tag(DIRECTIVE_TAG)),
-        value(CommentKind::Documentation, tag(DOC_TAG)),
-        value(CommentKind::Preserved, tag(PRESERVED_COMMENT_TAG)),
-    ))(input)
+fn inline_comment_chunk<'input>(input: &'input str) -> IResult<&'input str, Chunk<'input>> {
+    map(inline_comment, |c| Chunk::Comment(c.trimmed()))(input)
 }
 
-fn special_comment(input: &str) -> IResult<&str, Comment<&str>> {
-    map(pair(comment_tag, not_line_ending), |(kind, text)| Comment {
-        kind,
-        text,
+/// Parses any comment.
+fn any_comment(input: &str) -> IResult<&str, Comment<&str>> {
+    map(pair(any_comment_tag, not_line_ending), |(kind, text)| {
+        Comment { kind, text }
     })(input)
 }
 
-fn collapse_comments(comments: Vec<Comment<&str>>) -> Vec<Comment<String>> {
-    if comments.is_empty() {
-        return Vec::with_capacity(0);
-    }
-
-    let mut ret = Vec::with_capacity(comments.len());
-    // Safety: `comments` is non-empty
-    let mut last = comments.first().unwrap().to_owned();
-    for comment in comments.iter().skip(1) {
-        if comment.kind == last.kind {
-            last.text.push_str(comment.text);
-        } else {
-            ret.push(last);
-            last = comment.to_owned();
-        }
-    }
-    ret.push(last);
-    ret
-}
-
-fn special_comment_block(input: &str) -> IResult<&str, Vec<Comment<String>>> {
+/// A block of comments. Comment tags may be indented any amount, but non-comment source code is
+/// not allowed.
+fn any_comment_block(input: &str) -> IResult<&str, Vec<Comment<String>>> {
     map(
-        separated_nonempty_list(complete::char('\n'), special_comment),
+        separated_nonempty_list(pair(line_ending, multispace0), any_comment),
         collapse_comments,
     )(input)
 }
 
-fn eol_comment_block(input: &str) -> IResult<&str, Vec<Comment<String>>> {
-    map(
-        separated_nonempty_list(complete::char('\n'), eol_comment),
-        collapse_comments,
-    )(input)
-}
-
-fn sol_comment_block(input: &str) -> IResult<&str, Vec<Comment<String>>> {
-    preceded(
-        pair(complete::char('\n'), one_of(" \t")),
-        alt((
-            special_comment_block,
-            eol_comment_block, // An EOL comment at the start of the line.
-        )),
-    )(input)
-}
-
-fn any_comment(input: &str) -> IResult<&str, Vec<Chunk>> {
-    map(alt((sol_comment_block, eol_comment_block)), |comments| {
+/// any_comment_block wrapped in `Chunk`s.
+fn any_comment_chunk<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
+    map(any_comment_block, |comments| {
         comments.iter().cloned().map(Chunk::Comment).collect()
     })(input)
 }
 
-pub fn parse<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
-    enum OneOrMore<'a> {
-        One(iter::Once<Chunk<'a>>),
-        More(vec::IntoIter<Chunk<'a>>),
-    };
-
-    impl<'a> Iterator for OneOrMore<'a> {
-        type Item = Chunk<'a>;
-
-        fn next(&mut self) -> Option<Self::Item> {
-            match self {
-                OneOrMore::One(chunk) => chunk.next(),
-                OneOrMore::More(chunks) => chunks.next(),
-            }
-        }
+/// Collapses adjacent comments of the same `kind` into one comment with all the text concatenated
+/// and unindented.
+fn collapse_comments(comments: Vec<Comment<&str>>) -> Vec<Comment<String>> {
+    match comments.len() {
+        0 => Vec::with_capacity(0),
+        1 => vec![comments[0].trimmed()],
+        _ => comments
+            .into_iter()
+            .group_by(|c| c.kind)
+            .into_iter()
+            .map(|(kind, mut group)| Comment {
+                kind,
+                text: unindent(&format!("\n{}", &group.join(""))),
+            })
+            .collect(),
     }
+}
 
-    map(
-        many0(alt((
-            map(non_comment, |nc| {
-                OneOrMore::One(iter::once(Chunk::Source(nc)))
+pub fn parse<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
+    let non_comment = map(non_comment_chunk, Chunks::One);
+    let inline_comment = map(inline_comment_chunk, Chunks::One);
+    let any_comments = map(any_comment_chunk, Chunks::More);
+
+    fold_many0(
+        alt((
+            // non-comment source followed by an optional inline comment and a line-end
+            terminated(pair(non_comment, opt(inline_comment)), line_ending_or_eof),
+            // a block of sol-comments
+            map(terminated(any_comments, line_ending_or_eof), |comments| {
+                (comments, None)
             }),
-            map(any_comment, |comments| {
-                OneOrMore::More(comments.into_iter())
-            }),
-        ))),
-        |mut chunks_2d| chunks_2d.iter_mut().flatten().collect(),
+        )),
+        Vec::<Chunk<'input>>::new(),
+        |mut acc, (chunks, maybe_chunk)| {
+            acc.extend(chunks);
+            if let Some(chunk) = maybe_chunk {
+                acc.extend(chunk);
+            }
+            acc
+        },
     )(input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indoc::indoc;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -195,11 +282,51 @@ mod tests {
                     Chunk::Source("lorem ipsum dolor..."),
                     Chunk::Comment(Comment {
                         kind: CommentKind::Eol,
-                        text: " eol comment (thrown away)".to_string(),
+                        text: "eol comment (thrown away)".to_string(),
                     }),
                 ]
             )),
             parse("lorem ipsum dolor...% eol comment (thrown away)")
+        );
+    }
+
+    #[test]
+    fn parse_directives() {
+        assert_eq!(
+            Ok((
+                "",
+                vec![
+                    Chunk::Comment(Comment {
+                        text: indoc!(
+                            "
+                            ezlatexdoc directives
+                            all come in blocks where each line starts with '%%%'
+                            whitespace before the markers is optional.
+                            "
+                        )
+                        .trim_end()
+                        .to_string(),
+                        kind: CommentKind::Directive,
+                    }),
+                    Chunk::Comment(Comment {
+                        text: "this plain comment will be thrown out...".to_string(),
+                        kind: CommentKind::Eol,
+                    }),
+                    Chunk::Comment(Comment {
+                        text: "...but it breaks up the directive blocks into two.".to_string(),
+                        kind: CommentKind::Directive,
+                    }),
+                ]
+            )),
+            parse(indoc!(
+                "
+                %%% ezlatexdoc directives
+                %%% all come in blocks where each line starts with '%%%'
+                %%% whitespace before the markers is optional.
+                % this plain comment will be thrown out...
+                %%% ...but it breaks up the directive blocks into two.
+                "
+            )),
         );
     }
 }
