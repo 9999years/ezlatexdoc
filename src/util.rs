@@ -1,14 +1,13 @@
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::Path;
 
-// Returns an Iterator<Item = io::Result<String>>
-pub fn file_lines<P>(path: P) -> io::Result<io::Lines<BufReader<File>>>
+pub fn reader<P>(path: P) -> io::Result<BufReader<File>>
 where
     P: AsRef<Path>,
 {
-    Ok(BufReader::new(File::open(path)?).lines())
+    Ok(BufReader::new(File::open(path)?))
 }
 
 /// Surely there must be an easier way of saying 'either a File or an io::Stdout but the important

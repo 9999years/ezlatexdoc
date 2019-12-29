@@ -10,14 +10,16 @@ use nom::{
     bytes::complete::tag,
     character::complete,
     character::complete::{anychar, line_ending, multispace0, none_of, not_line_ending},
-    combinator::{complete, map, not, opt, recognize, value},
-    multi::{fold_many0, many1, separated_nonempty_list},
+    combinator::{complete, flat_map, map, not, opt, peek, recognize, value, verify},
+    multi::{count, fold_many0, many1, many1_count, separated_nonempty_list},
     sequence::{pair, preceded, terminated},
 };
 
 use unindent::unindent;
 
 use itertools::Itertools;
+
+use crate::error::{Error, Result as EzResult};
 
 const DIRECTIVE_TAG: &str = "%%%";
 const DOC_TAG: &str = "%%";
@@ -128,19 +130,40 @@ fn escaped(input: &str) -> IResult<&str, &str> {
     recognize(pair(complete::char('\\'), none_of("\r\n")))(input)
 }
 
-/// Recognizes as long a sequence of non-comment source code as possible (either a character
-/// /[^\\%\n]/, or an escape). Stops parsing when it finds a comment or a newline.
-fn non_comment(input: &str) -> IResult<&str, &str> {
-    recognize(many1(alt((
-        recognize(none_of("%\\\r\n")),
-        recognize(escaped),
-    ))))(input)
+/// Determines how many line_endings can be recognized, and consumes all but the last one.
+fn almost_all_line_endings(input: &str) -> IResult<&str, &str> {
+    recognize(flat_map(
+        peek(verify(many1_count(line_ending), |&count| count > 1)),
+        |endings| count(line_ending, endings - 1),
+    ))(input)
 }
 
-/// non_comment wrapped in a chunk.
+fn non_comment_line_endings(input: &str) -> IResult<&str, &str> {
+    recognize(pair(many1(line_ending), non_comment_fragment))(input)
+}
+
+/// Recognizes as long a sequence of non-comment source code as possible (either a character
+/// /[^\\%\n]/, or an escape). Stops parsing when it finds a comment or a newline.
+fn non_comment_fragment<'input>(input: &'input str) -> IResult<&'input str, &'input str> {
+    alt((
+        recognize(none_of("%\\\r\n")),
+        escaped,
+        non_comment_line_endings,
+        almost_all_line_endings,
+    ))(input)
+}
+
+fn long_non_comment_fragment<'input>(input: &'input str) -> IResult<&'input str, &'input str> {
+    recognize(many1(non_comment_fragment))(input)
+}
+
+/// non_comment_fragment wrapped in a chunk.
 fn non_comment_chunk<'input>(input: &'input str) -> IResult<&'input str, Chunk<'input>> {
     map(
-        recognize(separated_nonempty_list(line_ending, non_comment)),
+        recognize(separated_nonempty_list(
+            many1(line_ending),
+            long_non_comment_fragment,
+        )),
         Chunk::Source,
     )(input)
 }
@@ -233,7 +256,7 @@ fn collapse_comments(comments: Vec<Comment<&str>>) -> Vec<Comment<String>> {
     }
 }
 
-fn parse_document_fragment<'input>(
+fn lex_document_fragment<'input>(
     input: &'input str,
 ) -> IResult<&'input str, (Chunks<'input>, Option<Chunks<'input>>)> {
     let non_comment = map(non_comment_chunk, Chunks::One);
@@ -251,9 +274,9 @@ fn parse_document_fragment<'input>(
     ))(input)
 }
 
-fn parse_document_greedy<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
+fn lex_document_greedy<'input>(input: &'input str) -> IResult<&'input str, Vec<Chunk<'input>>> {
     fold_many0(
-        parse_document_fragment,
+        lex_document_fragment,
         Vec::<Chunk<'input>>::new(),
         |mut acc, (chunks, maybe_chunk)| {
             acc.extend(chunks);
@@ -265,10 +288,10 @@ fn parse_document_greedy<'input>(input: &'input str) -> IResult<&'input str, Vec
     )(input)
 }
 
-pub fn parse_document<'input>(
-    input: &'input str,
-) -> Result<Vec<Chunk<'input>>, nom::Err<(&'input str, nom::error::ErrorKind)>> {
-    Ok(complete(parse_document_greedy)(input)?.1)
+pub fn lex_document<'input>(input: &'input str) -> EzResult<Vec<Chunk<'input>>> {
+    complete(lex_document_greedy)(input)
+        .map(|(_, chunks)| chunks)
+        .map_err(Error::Lex)
 }
 
 #[cfg(test)]
@@ -279,8 +302,14 @@ mod tests {
     use unindent::unindent;
 
     /// Utility function for creating a chunk of source code.
-    fn src(source: &str) -> Chunk<'_> {
+    fn src(source: &'_ str) -> Chunk<'_> {
         Chunk::Source(source)
+    }
+
+    macro_rules! src {
+        ($s:literal) => {
+            src(indoc!($s))
+        };
     }
 
     fn _comment(text: &str, kind: CommentKind) -> Chunk<'_> {
@@ -311,18 +340,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty() {
-        assert_eq!(Ok(vec![]), parse_document(""));
+    fn lex_empty() {
+        assert_eq!(Ok(vec![]), lex_document(""));
     }
 
     #[test]
-    fn parse_source_simple() {
+    fn lex_source_simple() {
         assert_eq!(
-            Ok(vec![src(indoc!(
+            Ok(vec![src!(
                 "lorem ipsum dolor...
                  foo bar baz"
-            ))]),
-            parse_document(indoc!(
+            )]),
+            lex_document(indoc!(
                 "lorem ipsum dolor...
                  foo bar baz"
             ))
@@ -330,23 +359,23 @@ mod tests {
 
         assert_eq!(
             Ok(vec![src("lorem ipsum dolor...")]),
-            parse_document("lorem ipsum dolor...")
+            lex_document("lorem ipsum dolor...")
         );
     }
 
     #[test]
-    fn parse_eol_comment_simple() {
+    fn lex_eol_comment_simple() {
         assert_eq!(
             Ok(vec![
                 src("lorem ipsum dolor..."),
                 eol("eol comment (thrown away)"),
             ]),
-            parse_document("lorem ipsum dolor...% eol comment (thrown away)")
+            lex_document("lorem ipsum dolor...% eol comment (thrown away)")
         );
     }
 
     #[test]
-    fn parse_directives() {
+    fn lex_directives() {
         assert_eq!(
             Ok(vec![
                 dir("ezlatexdoc directives
@@ -355,7 +384,7 @@ mod tests {
                 eol("this plain comment will be thrown out..."),
                 dir("...but it breaks up the directive blocks into two."),
             ]),
-            parse_document(indoc!(
+            lex_document(indoc!(
                 "
                 %%% ezlatexdoc directives
                 %%% all come in blocks where each line starts with '%%%'
@@ -368,14 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_mixed() {
+    fn lex_mixed() {
         assert_eq!(
             Ok(vec![
-                src(indoc!(
+                src!(
                     "foo bar
                      foo bar baz
                      foo bar"
-                )),
+                ),
                 eol("eol"),
                 src("foo baz"),
                 preserved("preserved"),
@@ -384,13 +413,13 @@ mod tests {
                 doc("documentation...
                     ...goes here, and doesn't even need to be in TeX"),
                 eol("impl note"),
-                src(indoc!(
+                src!(
                     "more source...
                      foo bar baz
                      bux boz"
-                )),
+                ),
             ]),
-            parse_document(indoc!(
+            lex_document(indoc!(
                 "foo bar
                 foo bar baz
                 foo bar% eol
@@ -405,6 +434,110 @@ mod tests {
                 foo bar baz
                 bux boz
                 "
+            ))
+        );
+    }
+
+    #[test]
+    fn lex_newlines_simple() {
+        assert_eq!(Ok(vec![]), lex_document("\n"));
+        assert_eq!(Ok(vec![src(" ")]), lex_document(" \n"));
+        assert_eq!(Ok(vec![src("\n")]), lex_document("\n\n"));
+        assert_eq!(Ok(vec![src("\n\n")]), lex_document("\n\n\n"));
+    }
+
+    #[test]
+    fn lex_newlines_comments() {
+        assert_eq!(
+            Ok(vec![eol("eol"), src("\n\n")]),
+            lex_document("%eol\n\n\n\n")
+        );
+        assert_eq!(
+            Ok(vec![src("foo\nbar"), eol("eol"), src("\n\n")]),
+            lex_document("foo\nbar\n%eol\n\n\n\n")
+        );
+    }
+
+    #[test]
+    fn lex_newlines_source() {
+        assert_eq!(
+            Ok(vec![src("\n\n\\RequirePackage{expl3}")]),
+            lex_document("\n\n\\RequirePackage{expl3}")
+        );
+
+        assert_eq!(
+            Ok(vec![src("\n\n\\RequirePackage{expl3}")]),
+            lex_document(indoc!(
+                r#"
+
+
+                \RequirePackage{expl3}
+                "#
+            ))
+        );
+    }
+
+    #[test]
+    fn lex_newlines_comments_and_source() {
+        assert_eq!(
+            Ok(vec![eol("Module 'mn'"), src(r"\RequirePackage{expl3}"),]),
+            lex_document(indoc!(
+                r"% Module 'mn'
+                  \RequirePackage{expl3}"
+            ))
+        );
+
+        assert_eq!(
+            Ok(vec![eol("Module 'mn'"), src("\n\\RequirePackage{expl3}"),]),
+            lex_document(indoc!(
+                r"% Module 'mn'
+
+                  \RequirePackage{expl3}"
+            ))
+        );
+    }
+
+    #[test]
+    fn lex_mathnotes() {
+        assert_eq!(
+            Ok(vec![
+                dir(r#"src_output = "mathnotes-stripped-src.tex"
+                       doc_output = "mathnotes-doc.md""#),
+                src!(
+                    r#"\NeedsTeXFormat{LaTeX2e}
+                       \ProvidesExplPackage{mathnotes}{2019/10/17}{0.0.1}{Styles for mathematical
+                       note taking.}"#
+                ),
+                eol("Module 'mn'"),
+                src!(
+                    r#"
+
+                    \RequirePackage{expl3}"#
+                ),
+                eol("Load some utility packages."),
+                src("\\RequirePackage{xparse}  "),
+                eol("Better command declarations."),
+                eol("\\RequirePackage{etoolbox}  % Robust command declarations."),
+                src("\\RequirePackage{xkeyval}  "),
+                eol("Better keyval parsing."),
+                src("\\RequirePackage{kvoptions}  "),
+                eol("More flexible package options."),
+            ]),
+            lex_document(indoc!(
+                r#"%%% src_output = "mathnotes-stripped-src.tex"
+                %%% doc_output = "mathnotes-doc.md"
+                \NeedsTeXFormat{LaTeX2e}
+                \ProvidesExplPackage{mathnotes}{2019/10/17}{0.0.1}{Styles for mathematical
+                note taking.}
+                % Module 'mn'
+
+                \RequirePackage{expl3}
+                % Load some utility packages.
+                \RequirePackage{xparse}  % Better command declarations.
+                % \RequirePackage{etoolbox}  % Robust command declarations.
+                \RequirePackage{xkeyval}  % Better keyval parsing.
+                \RequirePackage{kvoptions}  % More flexible package options.
+                "#
             ))
         );
     }
