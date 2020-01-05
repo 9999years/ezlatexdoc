@@ -20,15 +20,25 @@ pub enum Error<'a> {
     DirectivesParseToml(#[from] TomlError),
 
     #[error("Failed to open file: {0:#?}")]
-    FileOpen(#[from] Box<IoError>),
+    FileOpen(#[source] Box<IoError>),
+
+    #[error("Failed to write file: {0:#?}")]
+    Write(#[source] Box<IoError>),
 
     #[error("Failed to format: {0:#?}")]
     Format(#[from] fmt::Error),
+
+    #[error("No src_output or doc_output files provided")]
+    NoOutput,
 }
 
-impl<'a> From<io::Error> for Error<'a> {
-    fn from(err: io::Error) -> Error<'a> {
+impl<'a> Error<'a> {
+    pub fn file_open(err: io::Error) -> Error<'a> {
         Error::FileOpen(Box::new(IoError(err)))
+    }
+
+    pub fn write(err: io::Error) -> Error<'a> {
+        Error::Write(Box::new(IoError(err)))
     }
 }
 

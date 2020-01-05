@@ -1,14 +1,17 @@
-use std::error::Error;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::exit;
 
 use clap::{clap_app, App, ArgMatches};
 use structopt::StructOpt;
 
-use ezlatexdoc::{parse, process, util};
+use ezlatexdoc::{
+    error::{Error, Result as EzResult},
+    parse, process, util,
+};
 
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -80,14 +83,36 @@ struct Opt {
 // Ok(())
 // }
 
+struct Run {
+    input: String,
+}
+
+impl Run {
+    pub fn new<P>(path: P) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        Self {
+            input: {
+                let mut reader = util::reader(path).unwrap();
+                let mut s = String::with_capacity(10_000);
+                reader.read_to_string(&mut s).unwrap();
+                s
+            },
+        }
+    }
+
+    pub fn process<'a>(&'a self) -> EzResult<'a, ()> {
+        let mut process = process::Process::default();
+        process.process_document(&self.input)?;
+        Ok(())
+    }
+}
+
 fn main() {
     let opt = Opt::from_args();
-    let mut reader = util::reader(opt.input).unwrap();
-    let mut process = process::Process::default();
-    let mut input = String::with_capacity(10_000);
-    reader.read_to_string(&mut input).unwrap();
-    for node in parse::parse_document(&input).unwrap() {
-        process.process(dbg!(node)).unwrap();
+    if let Err(e) = Run::new(opt.input).process() {
+        println!("Error: {}", e);
+        exit(1);
     }
-    process.finish();
 }
