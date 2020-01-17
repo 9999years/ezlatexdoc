@@ -18,6 +18,11 @@ use crate::util;
 // pub doc: D,
 // }
 
+const EXPECT_SRC_MSG: &'static str =
+    "A src_output directive must be given before the first source text.";
+const EXPECT_DOC_MSG: &'static str =
+    "A doc_output directive must be given before the first documentation text.";
+
 pub struct Process {
     src: String,
     doc: String,
@@ -47,10 +52,19 @@ impl Process {
 
     pub fn process<'input>(&mut self, node: Node<'input>) -> EzResult<'input, ()> {
         match node {
-            Node::Source(src) => write!(self.src, "{}", src).map_err(Error::Format),
-            Node::PreservedComment(c) => writeln!(self.src, "% {}", c).map_err(Error::Format),
-            Node::Comment => writeln!(self.src, "%").map_err(Error::Format),
-            Node::Documentation(doc) => write!(self.doc, "{}", doc).map_err(Error::Format),
+            Node::Source(src) => write!(self.src_output.as_ref().expect(EXPECT_SRC_MSG), "{}", src)
+                .map_err(Error::write),
+            Node::PreservedComment(c) => {
+                writeln!(self.src_output.as_ref().expect(EXPECT_SRC_MSG), "% {}", c)
+                    .map_err(Error::write)
+            }
+            Node::Comment => {
+                writeln!(self.src_output.as_ref().expect(EXPECT_SRC_MSG), "%").map_err(Error::write)
+            }
+            Node::Documentation(doc) => {
+                write!(self.doc_output.as_ref().expect(EXPECT_DOC_MSG), "{}", doc)
+                    .map_err(Error::write)
+            }
             Node::Directives(d) => {
                 if let Some(src_filename) = d.src_output {
                     self.src_output = Some(util::open_new(src_filename).map_err(Error::file_open)?);

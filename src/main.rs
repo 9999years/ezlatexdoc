@@ -23,7 +23,7 @@ use ezlatexdoc::{
 struct Opt {
     /// Input file
     #[structopt(parse(from_os_str))]
-    input: PathBuf,
+    input_files: Vec<PathBuf>,
 }
 
 // quick_error! {
@@ -111,8 +111,10 @@ impl Run {
 
 fn main() {
     let opt = Opt::from_args();
-    if let Err(e) = Run::new(opt.input).process() {
-        println!("Error: {}", e);
-        exit(1);
+    for input_file in opt.input_files {
+        if let Err(e) = Run::new(input_file).process() {
+            println!("Error: {}", e);
+            exit(1);
+        }
     }
 }

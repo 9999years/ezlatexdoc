@@ -26,7 +26,7 @@ pub enum Error<'a> {
     Write(#[source] Box<IoError>),
 
     #[error("Failed to format: {0:#?}")]
-    Format(#[from] fmt::Error),
+    Format(#[source] Box<IoError>),
 
     #[error("No src_output or doc_output files provided")]
     NoOutput,
